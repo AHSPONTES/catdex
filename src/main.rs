@@ -2,7 +2,7 @@
 extern crate diesel;
 
 use actix_files::Files;
-use actix_web::{web, App, Error, HttpResponse, HttpServer};
+use actix_web::{http, web, App, Error, HttpResponse, HttpServer};
 use serde::Serialize;
 use std::env;
 
@@ -17,6 +17,9 @@ use self::models::*;
 mod models;
 mod schema;
 use self::schema::cats::dsl::*; // provides alias like "cats"
+
+use awmp::Parts;
+use std::collections::HashMap;
 
 // PgConnection comes from diesel::prelude
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
@@ -53,6 +56,35 @@ async fn add(hb: web::Data<Handlebars<'_>>) -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().body(body))
 }
 
+async fn add_cat_form(pool: web::Data<DbPool>, mut parts: Parts) -> Result<HttpResponse, Error> {
+    let file_path = parts
+        .files
+        .take("image")
+        .pop()
+        .and_then(|f| f.persist_in("./static/image").ok())
+        .unwrap_or_default();
+
+    let text_fields: HashMap<_, _> = parts.texts.as_pairs().into_iter().collect();
+    let connection = pool.get().expect("Can't get db connection from pool");
+
+    let new_cat = NewCat {
+        name: text_fields.get("name").unwrap().to_string(),
+        image_path: file_path.to_string_lossy().to_string(),
+    };
+
+    web::block(move || {
+        diesel::insert_into(cats)
+            .values(&new_cat)
+            .execute(&connection)
+    })
+    .await
+    .map_err(|_| HttpResponse::InternalServerError().finish())?;
+    // https://tools.ietf.org/html/rfc7231#section-6.4.4
+    Ok(HttpResponse::SeeOther()
+        .header(http::header::LOCATION, "/")
+        .finish())
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Setting up the handlebar template engine
@@ -65,9 +97,7 @@ async fn main() -> std::io::Result<()> {
 
     // Setting up the database connection pool
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-
     let manager = ConnectionManager::<PgConnection>::new(&database_url);
-
     let pool = r2d2::Pool::builder()
         .build(manager)
         .expect("Failed to create DB connection pool.");
