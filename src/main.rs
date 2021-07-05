@@ -1,6 +1,9 @@
+#[macro_use]
+extern crate diesel;
+
 use actix_files::Files;
 use actix_web::{web, App, Error, HttpResponse, HttpServer};
-use serde_json::json;
+use serde::Serialize;
 use std::env;
 
 use handlebars::Handlebars;
@@ -9,31 +12,39 @@ use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 
-mod models;
 use self::models::*;
 
-async fn index(hb: web::Data<Handlebars<'_>>) -> HttpResponse {
-    let data = json!({
-        "project_name": "Catdex",
-        "cats": [
-            {
-                "name": "British short hair",
-                "image_path": "/static/image/british-short-hair.jpg"
-            },
-            {
-                "name": "Persian",
-                "image_path": "/static/image/persian.jpg"
-            },
-            {
-                "name": "Ragdoll",
-                "image_path": "/static/image/ragdoll.jpg"
-            }
-        ]
-    });
+mod models;
+mod schema;
+use self::schema::cats::dsl::*; // provides alias like "cats"
+
+// PgConnection comes from diesel::prelude
+type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
+
+#[derive(Serialize)]
+struct IndexTemplateData {
+    project_name: String,
+    cats: Vec<self::models::Cat>,
+}
+
+async fn index(
+    hb: web::Data<Handlebars<'_>>,
+    pool: web::Data<DbPool>,
+) -> Result<HttpResponse, Error> {
+    let connection = pool.get().expect("Can't get db connection from pool");
+
+    let cats_data = web::block(move || cats.limit(100).load::<Cat>(&connection))
+        .await
+        .map_err(|_| HttpResponse::InternalServerError().finish())?;
+
+    let data = IndexTemplateData {
+        project_name: "Catdex".to_string(),
+        cats: cats_data,
+    };
 
     let body = hb.render("index", &data).unwrap();
 
-    HttpResponse::Ok().body(body)
+    Ok(HttpResponse::Ok().body(body))
 }
 
 #[actix_web::main]
